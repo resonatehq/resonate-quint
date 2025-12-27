@@ -95,10 +95,6 @@ module promise_test {
     val result = apply(promiseWithState(Pending), Settle)
     result.effects == Set()
 
-  pure val testGetCreateTaskWorkers: bool =
-    val effects: Set[Effect] = Set(CreateTask(testWorkers))
-    getCreateTaskWorkers(effects) == testWorkers
-
   // ==========================================================================
   // All Tests
   // ==========================================================================
@@ -121,7 +117,6 @@ module promise_test {
     testCreateWithWorkersEmitsEffect and
     testCreateWithoutWorkersNoEffect and
     testSettleFiresCallbacks and
-    testSettleNoCallbacksNoEffects and
-    testGetCreateTaskWorkers
+    testSettleNoCallbacksNoEffects
 
 }

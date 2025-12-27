@@ -41,10 +41,11 @@ module world {
   }
 
   /// Create a promise (and task if workers is non-empty)
+  /// Precondition: promise does not exist
   action createPromise(id: str, workers: Set[str]): bool = {
-    val newServer = server::createPromise(state.server, id, workers)
     all {
-      server::getPromiseState(newServer, id) == promise::Pending,
+      server::getPromiseState(state.server, id) == promise::Init,  // precondition
+      val newServer = server::createPromise(state.server, id, workers)
       state' = { ...state, server: newServer }
     }
   }

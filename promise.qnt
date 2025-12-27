@@ -75,28 +75,6 @@ module promise {
     }
 
   // ==========================================================================
-  // Effect Helpers
-  // ==========================================================================
-
-  /// Extract workers from CreateTask effect (empty if not present)
-  pure def getCreateTaskWorkers(effects: Set[Effect]): Set[str] =
-    effects.fold(Set(), (acc, effect) =>
-      match effect {
-        | CreateTask(workers) => acc.union(workers)
-        | _ => acc
-      }
-    )
-
-  /// Extract task IDs from QueueTask effects
-  pure def getQueuedTaskIds(effects: Set[Effect]): Set[str] =
-    effects.fold(Set(), (acc, effect) =>
-      match effect {
-        | QueueTask(taskId) => acc.union(Set(taskId))
-        | _ => acc
-      }
-    )
-
-  // ==========================================================================
   // Properties
   // ==========================================================================
 
