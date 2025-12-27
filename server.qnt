@@ -55,17 +55,15 @@ module server {
     match effect {
       | CreateTask(workers) =>
           val t = getTask(s, promiseId)
-          val result = task::apply({ ...t, id: promiseId }, task::Create({ msg: task::Invoke, workers: workers }))
+          val result = task::apply({ ...t, id: promiseId }, task::Create(workers))
           { ...s, tasks: s.tasks.put(promiseId, result.task) }
       | QueueTask(taskId) =>
           val t = getTask(s, taskId)
-          val result = task::apply(t, task::ResumeTask(promiseId))
+          val result = task::apply(t, task::Enqueue(promiseId))
           { ...s, tasks: s.tasks.put(taskId, result.task) }
     }
 
   /// Translate promise effects to task operations
-  /// CreateTask(workers) -> create task with Invoke message
-  /// QueueTask(taskId) -> resume that task
   pure def applyPromiseEffects(s: Server, promiseId: str, effects: Set[promise::Effect]): Server =
     effects.fold(s, (server, effect) => applyPromiseEffect(server, promiseId, effect))
 
@@ -107,21 +105,15 @@ module server {
     { ...s, tasks: s.tasks.put(taskId, result.task) }
 
   /// Complete a task
-  pure def completeTask(s: Server, taskId: str, createsCallbacks: bool): Server =
+  pure def completeTask(s: Server, taskId: str, version: int, createsCallbacks: bool): Server =
     val t = getTask(s, taskId)
-    val result = task::apply(t, task::Complete(createsCallbacks))
+    val result = task::apply(t, task::Complete({ version: version, createsCallbacks: createsCallbacks }))
     { ...s, tasks: s.tasks.put(taskId, result.task) }
 
   /// Drop a task (release claim)
-  pure def dropTask(s: Server, taskId: str): Server =
+  pure def dropTask(s: Server, taskId: str, version: int): Server =
     val t = getTask(s, taskId)
-    val result = task::apply(t, task::Drop)
-    { ...s, tasks: s.tasks.put(taskId, result.task) }
-
-  /// Create a task directly
-  pure def createTask(s: Server, taskId: str, msg: task::Message, workers: Set[str]): Server =
-    val t = getTask(s, taskId)
-    val result = task::apply({ ...t, id: taskId }, task::Create({ msg: msg, workers: workers }))
+    val result = task::apply(t, task::Drop(version))
     { ...s, tasks: s.tasks.put(taskId, result.task) }
 
   // ==========================================================================
@@ -129,14 +121,14 @@ module server {
   // ==========================================================================
 
   /// Complete a task and settle its promise (no children)
-  pure def completeAndSettle(s: Server, taskId: str): Server =
-    val s1 = completeTask(s, taskId, false)
+  pure def completeAndSettle(s: Server, taskId: str, version: int): Server =
+    val s1 = completeTask(s, taskId, version, false)
     settlePromise(s1, taskId)
 
   /// Complete a task with child, create child promise, register callback
-  pure def completeWithChild(s: Server, parentTaskId: str, childPromiseId: str, childWorkers: Set[str]): Server =
+  pure def completeWithChild(s: Server, parentTaskId: str, version: int, childPromiseId: str, childWorkers: Set[str]): Server =
     // Complete parent task (goes to Waiting because createsCallbacks=true)
-    val s1 = completeTask(s, parentTaskId, true)
+    val s1 = completeTask(s, parentTaskId, version, true)
     // Create child promise with workers (creates child task)
     val s2 = createPromise(s1, childPromiseId, childWorkers)
     // Register callback: when child settles, resume parent

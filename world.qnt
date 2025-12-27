@@ -74,7 +74,7 @@ module world {
   /// Worker completes task (no children) - settles promise
   action doWorkerComplete(taskId: str): bool = {
     val t = server::getTask(state.server, taskId)
-    val newServer = server::completeAndSettle(state.server, taskId)
+    val newServer = server::completeAndSettle(state.server, taskId, t.version)
     all {
       t.state == task::Claimed,
       state' = { ...state, server: newServer }
@@ -84,7 +84,7 @@ module world {
   /// Worker completes task with child promise (creates callback)
   action doWorkerCompleteWithChild(parentId: str, childId: str, childWorkers: Set[str]): bool = {
     val t = server::getTask(state.server, parentId)
-    val newServer = server::completeWithChild(state.server, parentId, childId, childWorkers)
+    val newServer = server::completeWithChild(state.server, parentId, t.version, childId, childWorkers)
     all {
       t.state == task::Claimed,
       state' = { ...state, server: newServer }

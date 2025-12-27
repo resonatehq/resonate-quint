@@ -20,7 +20,7 @@ module task {
   /// Message to deliver to worker
   type Message =
     | Invoke        // Initial invocation (task ID is implicit)
-    | Resume(str)   // Resume after callback: id is the promise that resumed this one
+    | Resume(str)   // Resume after callback: id is the promise that triggered callback
 
   /// Task record
   type Task = {
@@ -46,19 +46,19 @@ module task {
   // Actions and Effects
   // ==========================================================================
 
-  /// Create parameters
-  type CreateParams = {
-    msg: Message,
-    workers: Set[str]
+  /// Complete action parameters
+  type CompleteParams = {
+    version: int,
+    createsCallbacks: bool
   }
 
   /// Actions that can be applied to a task
   type Action =
-    | Create(CreateParams)          // create task with message and target workers
-    | Claim(int)                    // version (fencing token)
-    | Complete(bool)                // true = creates callbacks (-> Waiting), false = done (-> Completed)
-    | Drop
-    | ResumeTask(str)               // triggered when deps complete
+    | Create(Set[str])          // workers eligible to work on this task
+    | Claim(int)                // version (fencing token)
+    | Complete(CompleteParams)  // version + createsCallbacks flag
+    | Drop(int)                 // version
+    | Enqueue(str)              // promiseId that completed (triggers callback)
 
   /// Effects produced by task state transitions
   type Effect =
@@ -74,18 +74,17 @@ module task {
   // Helpers
   // ==========================================================================
 
-  /// Get the ID from a message
-  pure def messageId(msg: Message): str =
-    match msg {
-      | Invoke => ""
-      | Resume(id) => id
+  /// Check if a promiseId is already current or in pending
+  pure def isDuplicate(t: Task, promiseId: str): bool =
+    val inCurrent = match t.current {
+      | Invoke => false
+      | Resume(id) => id == promiseId
     }
-
-  /// Check if a message is already current or in pending
-  pure def isDuplicate(t: Task, msg: Message): bool =
-    val id = messageId(msg)
-    if (id == "") false
-    else messageId(t.current) == id or t.pending.select(m => messageId(m) == id).length() > 0
+    val inPending = t.pending.select(m => match m {
+      | Invoke => false
+      | Resume(id) => id == promiseId
+    }).length() > 0
+    inCurrent or inPending
 
   // ==========================================================================
   // Apply
@@ -94,74 +93,63 @@ module task {
   /// Apply an action to a task (idempotent - returns unchanged if not applicable)
   pure def apply(t: Task, a: Action): Result =
     match a {
-      | Create(params) =>
+      | Create(workers) =>
           match t.state {
             | Init => {
-                task: { ...t, state: Pending, version: 0, workers: params.workers, current: params.msg, pending: [] },
-                effects: Set(Send(params.workers))
+                task: { ...t, state: Pending, version: 0, workers: workers, current: Invoke, pending: [] },
+                effects: Set(Send(workers))
               }
-            | _ =>
-                match params.msg {
-                  | Invoke => { task: t, effects: Set() }
-                  | Resume(_) =>
-                      if (isDuplicate(t, params.msg)) { task: t, effects: Set() }
-                      else { task: { ...t, pending: t.pending.append(params.msg) }, effects: Set() }
-                }
+            | _ => { task: t, effects: Set() }  // already exists
           }
 
       | Claim(version) =>
           match t.state {
             | Pending =>
                 if (version == t.version)
-                  { task: { ...t, state: Claimed, pending: [] }, effects: Set() }
+                  { task: { ...t, state: Claimed }, effects: Set() }
                 else { task: t, effects: Set() }  // wrong version
-            | Claimed =>
-                { task: t, effects: Set() }  // already claimed, idempotent
             | _ => { task: t, effects: Set() }
           }
 
-      | Complete(createsCallbacks) =>
+      | Complete(params) =>
           match t.state {
             | Claimed =>
-                if (t.pending.length() > 0)
-                  { task: { ...t, current: t.pending.head(), pending: [] }, effects: Set() }
-                else if (createsCallbacks)
+                if (params.version != t.version) { task: t, effects: Set() }  // wrong version
+                else if (t.pending.length() > 0)
+                  { task: { ...t, current: t.pending.head(), pending: t.pending.tail() }, effects: Set() }
+                else if (params.createsCallbacks)
                   { task: { ...t, state: Waiting }, effects: Set() }
                 else
                   { task: { ...t, state: Completed }, effects: Set() }
             | _ => { task: t, effects: Set() }
           }
 
-      | Drop =>
+      | Drop(version) =>
           match t.state {
-            | Claimed => {
-                task: { ...t, state: Pending, version: t.version + 1 },
-                effects: Set(Send(t.workers))
-              }
+            | Claimed =>
+                if (version != t.version) { task: t, effects: Set() }  // wrong version
+                else {
+                  task: { ...t, state: Pending, version: t.version + 1 },
+                  effects: Set(Send(t.workers))
+                }
             | _ => { task: t, effects: Set() }
           }
 
-      | ResumeTask(resumingPromiseId) =>
+      | Enqueue(promiseId) =>
           match t.state {
+            | Init => { task: t, effects: Set() }  // task doesn't exist
+            | Completed => { task: t, effects: Set() }  // task is done
             | Waiting => {
-                task: { ...t, state: Pending, version: t.version + 1, current: Resume(resumingPromiseId) },
+                // Resume immediately
+                task: { ...t, state: Pending, version: t.version + 1, current: Resume(promiseId) },
                 effects: Set(Send(t.workers))
               }
-            | _ => { task: t, effects: Set() }
+            | _ =>
+                // Pending or Claimed: buffer the message
+                if (isDuplicate(t, promiseId)) { task: t, effects: Set() }
+                else { task: { ...t, pending: t.pending.append(Resume(promiseId)) }, effects: Set() }
           }
     }
-
-  // ==========================================================================
-  // Effect Helpers
-  // ==========================================================================
-
-  /// Extract workers from Send effect (empty if not present)
-  pure def getSendWorkers(effects: Set[Effect]): Set[str] =
-    effects.fold(Set(), (acc, effect) =>
-      match effect {
-        | Send(workers) => acc.union(workers)
-      }
-    )
 
   // ==========================================================================
   // Properties

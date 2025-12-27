@@ -140,13 +140,15 @@ module world_test {
 
   pure val testCompleteNoCallbacks: bool = {
     val s = serverWithClaimedTask("task1")
-    val s2 = server::completeTask(s, "task1", false)
+    val t = server::getTask(s, "task1")
+    val s2 = server::completeTask(s, "task1", t.version, false)
     server::getTaskState(s2, "task1") == task::Completed
   }
 
   pure val testCompleteWithCallbacks: bool = {
     val s = serverWithClaimedTask("task1")
-    val s2 = server::completeTask(s, "task1", true)
+    val t = server::getTask(s, "task1")
+    val s2 = server::completeTask(s, "task1", t.version, true)
     server::getTaskState(s2, "task1") == task::Waiting
   }
 
@@ -156,14 +158,16 @@ module world_test {
 
   pure val testDropIncreasesVersion: bool = {
     val s = serverWithClaimedTask("task1")
-    val s2 = server::dropTask(s, "task1")
-    val t = server::getTask(s2, "task1")
-    t.state == task::Pending and t.version == 1
+    val t = server::getTask(s, "task1")
+    val s2 = server::dropTask(s, "task1", t.version)
+    val t2 = server::getTask(s2, "task1")
+    t2.state == task::Pending and t2.version == 1
   }
 
   pure val testReclaimAfterDrop: bool = {
     val s = serverWithClaimedTask("task1")
-    val s2 = server::dropTask(s, "task1")
+    val t = server::getTask(s, "task1")
+    val s2 = server::dropTask(s, "task1", t.version)
     val s3old = server::claimTask(s2, "task1", 0)  // old version
     val s3new = server::claimTask(s2, "task1", 1)  // new version
     server::getTaskState(s3old, "task1") == task::Pending and  // old version fails
@@ -176,14 +180,16 @@ module world_test {
 
   pure val testCompleteAndSettle: bool = {
     val s = serverWithClaimedTask("task1")
-    val s2 = server::completeAndSettle(s, "task1")
+    val t = server::getTask(s, "task1")
+    val s2 = server::completeAndSettle(s, "task1", t.version)
     server::getTaskState(s2, "task1") == task::Completed and
     server::getPromiseState(s2, "task1") == promise::Settled
   }
 
   pure val testCompleteWithChild: bool = {
     val s = serverWithClaimedTask("parent")
-    val s2 = server::completeWithChild(s, "parent", "child", testWorkers)
+    val t = server::getTask(s, "parent")
+    val s2 = server::completeWithChild(s, "parent", t.version, "child", testWorkers)
     // Parent goes to Waiting
     server::getTaskState(s2, "parent") == task::Waiting and
     // Child promise and task created
@@ -197,7 +203,8 @@ module world_test {
 
   pure val testChildSettleResumesParent: bool = {
     val s = serverWithClaimedTask("parent")
-    val s2 = server::completeWithChild(s, "parent", "child", testWorkers)
+    val t = server::getTask(s, "parent")
+    val s2 = server::completeWithChild(s, "parent", t.version, "child", testWorkers)
     val s3 = server::settlePromise(s2, "child")
     // Parent should be resumed (back to Pending with Resume message)
     val parentTask = server::getTask(s3, "parent")
