@@ -1,162 +1,183 @@
 // Task Tests
+//
+// Tests for the task state machine matching the API in task.qnt
 
 module task_test {
 
   import task.* from "./task"
 
+  // Helper to create a task from Init state
+  pure def createTask(msg: Message, workers: Set[str]): Task =
+    apply(initTask, Create({ msg: msg, workers: workers })).task
+
   // ==========================================================================
-  // Tests - Task Level
+  // Tests - Create Action
   // ==========================================================================
 
-  // --- Enqueue ---
-  pure val testEnqueue: bool =
-    val result = apply(initTask, Enqueue(Invoke))
-    result.status == Created and
-    result.tsk.state == Pending and
-    result.tsk.current == Invoke
+  // --- Create from Init ---
+  pure val testCreateFromInit: bool =
+    val result = apply(initTask, Create({ msg: Invoke, workers: Set("w1") }))
+    result.task.state == Pending and
+    result.task.current == Invoke and
+    result.task.workers == Set("w1") and
+    result.effects.contains(Send(Set("w1")))
 
-  pure val testEnqueueIdempotent: bool =
-    val t = { state: Pending, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, Enqueue(Invoke))
-    result.status == OK and result.tsk.state == Pending
+  pure val testCreateFromInitWithResume: bool =
+    val result = apply(initTask, Create({ msg: Resume("dep1"), workers: Set("w1", "w2") }))
+    result.task.state == Pending and
+    result.task.current == Resume("dep1") and
+    result.task.workers == Set("w1", "w2")
 
-  // --- Enqueue buffering ---
-  pure val testEnqueueBuffer: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, Enqueue(Resume("dep1")))
-    result.status == Created and
-    result.tsk.pending == [Resume("dep1")]
+  // --- Create idempotent (Invoke on existing task) ---
+  pure val testCreateIdempotentInvoke: bool =
+    val t = createTask(Invoke, Set("w1"))
+    val result = apply(t, Create({ msg: Invoke, workers: Set("w2") }))
+    result.task.state == Pending and
+    result.task == t and  // unchanged
+    result.effects == Set()
 
-  pure val testEnqueueBufferDuplicate: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [Resume("dep1")] }
-    val result = apply(t, Enqueue(Resume("dep1")))
-    result.status == OK and
-    result.tsk.pending == [Resume("dep1")]  // not added again
+  // --- Create buffering (Resume on existing task) ---
+  pure val testCreateBufferResume: bool =
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed }
+    val result = apply(t, Create({ msg: Resume("dep1"), workers: Set("w1") }))
+    result.task.pending == [Resume("dep1")] and
+    result.effects == Set()
 
-  pure val testEnqueueBufferMultiple: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [Resume("dep1")] }
-    val result = apply(t, Enqueue(Resume("dep2")))
-    result.status == Created and
-    result.tsk.pending == [Resume("dep1"), Resume("dep2")]
+  pure val testCreateBufferDuplicate: bool =
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed, pending: [Resume("dep1")] }
+    val result = apply(t, Create({ msg: Resume("dep1"), workers: Set("w1") }))
+    result.task.pending == [Resume("dep1")] and  // not added again
+    result.effects == Set()
 
-  pure val testEnqueueBufferCurrentDuplicate: bool =
-    val t = { state: Claimed, version: 0, current: Resume("dep1"), pending: [] }
-    val result = apply(t, Enqueue(Resume("dep1")))
-    result.status == OK and
-    result.tsk.pending == []  // already current
+  pure val testCreateBufferMultiple: bool =
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed, pending: [Resume("dep1")] }
+    val result = apply(t, Create({ msg: Resume("dep2"), workers: Set("w1") }))
+    result.task.pending == [Resume("dep1"), Resume("dep2")]
 
-  // --- Claim ---
+  pure val testCreateBufferCurrentDuplicate: bool =
+    val t = { ...createTask(Resume("dep1"), Set("w1")), state: Claimed }
+    val result = apply(t, Create({ msg: Resume("dep1"), workers: Set("w1") }))
+    result.task.pending == []  // already current, not buffered
+
+  // ==========================================================================
+  // Tests - Claim Action
+  // ==========================================================================
+
   pure val testClaimWithCorrectVersion: bool =
-    val t = apply(initTask, Enqueue(Invoke)).tsk
-    val result = apply(t, ClaimTask(0))
-    result.status == Created and
-    result.tsk.state == Claimed and
-    result.tsk.version == 0
+    val t = createTask(Invoke, Set("w1"))
+    val result = apply(t, Claim(0))
+    result.task.state == Claimed and
+    result.task.version == 0 and
+    result.effects == Set()
 
   pure val testClaimWithWrongVersion: bool =
-    val t = apply(initTask, Enqueue(Invoke)).tsk
-    val result = apply(t, ClaimTask(1))
-    result.status == Forbidden and
-    result.tsk.state == Pending
+    val t = createTask(Invoke, Set("w1"))
+    val result = apply(t, Claim(1))
+    result.task.state == Pending and  // unchanged
+    result.effects == Set()
 
   pure val testClaimIdempotent: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, ClaimTask(0))
-    result.status == OK and result.tsk.state == Claimed
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed }
+    val result = apply(t, Claim(0))
+    result.task.state == Claimed and
+    result.task == t  // unchanged
 
   pure val testClaimClearsPending: bool =
-    val t = { state: Pending, version: 0, current: Invoke, pending: [Resume("dep1"), Resume("dep2")] }
-    val result = apply(t, ClaimTask(0))
-    result.status == Created and
-    result.tsk.state == Claimed and
-    result.tsk.pending == []  // cleared on claim
+    val t = { ...createTask(Invoke, Set("w1")), pending: [Resume("dep1"), Resume("dep2")] }
+    val result = apply(t, Claim(0))
+    result.task.state == Claimed and
+    result.task.pending == []  // cleared on claim
+
+  // ==========================================================================
+  // Tests - Complete Action
+  // ==========================================================================
 
   // --- Complete (terminal) ---
-  pure val testCompletePromise: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, CompleteTask(false))
-    result.status == Created and
-    result.tsk.state == Completed
+  pure val testCompleteNoCallbacks: bool =
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed }
+    val result = apply(t, Complete(false))
+    result.task.state == Completed and
+    result.effects == Set()
 
   // --- Complete (with callbacks -> Waiting) ---
   pure val testCompleteWithCallbacks: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, CompleteTask(true))
-    result.status == Created and
-    result.tsk.state == Waiting and
-    result.tsk.version == 0
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed }
+    val result = apply(t, Complete(true))
+    result.task.state == Waiting and
+    result.task.version == 0
 
   // --- Complete with pending (stay Claimed, process next) ---
   pure val testCompleteWithPending: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [Resume("dep1"), Resume("dep2")] }
-    val result = apply(t, CompleteTask(true))  // would go to Waiting, but pending exists
-    result.status == Created and
-    result.tsk.state == Claimed and  // stays Claimed
-    result.tsk.current == Resume("dep1") and  // head of pending
-    result.tsk.pending == []  // cleared
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed, pending: [Resume("dep1"), Resume("dep2")] }
+    val result = apply(t, Complete(true))  // would go to Waiting, but pending exists
+    result.task.state == Claimed and  // stays Claimed (not in spec, but pending processed)
+    result.task.current == Resume("dep1") and  // head of pending
+    result.task.pending == []  // cleared
 
-  // --- Resume (Waiting -> Pending) ---
-  pure val testResume: bool =
-    val t = { state: Waiting, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, ResumeTask("dep1"))  // dep1 is the promise that resumed us
-    result.status == Created and
-    result.tsk.state == Pending and
-    result.tsk.version == 1 and
-    result.tsk.current == Resume("dep1")
+  pure val testCompleteFromNonClaimed: bool =
+    val t = createTask(Invoke, Set("w1"))  // Pending state
+    val result = apply(t, Complete(false))
+    result.task.state == Pending and  // unchanged
+    result.task == t
 
-  // --- Resume preserves pending ---
-  pure val testResumePreservesPending: bool =
-    val t = { state: Waiting, version: 0, current: Invoke, pending: [Resume("dep2")] }
-    val result = apply(t, ResumeTask("dep1"))
-    result.status == Created and
-    result.tsk.current == Resume("dep1") and
-    result.tsk.pending == [Resume("dep2")]  // preserved
+  // ==========================================================================
+  // Tests - Drop Action
+  // ==========================================================================
 
-  // --- Drop ---
   pure val testDrop: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, DropTask)
-    result.status == Created and
-    result.tsk.state == Pending and
-    result.tsk.version == 1 and
-    result.tsk.current == Invoke  // stays same
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed }
+    val result = apply(t, Drop)
+    result.task.state == Pending and
+    result.task.version == 1 and
+    result.task.current == Invoke and  // stays same
+    result.effects.contains(Send(Set("w1")))
 
-  // --- Halt ---
-  pure val testHalt: bool =
-    val t = { state: Claimed, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, HaltTask)
-    result.status == Created and
-    result.tsk.state == Halted and
-    result.tsk.version == 0
+  pure val testDropFromNonClaimed: bool =
+    val t = createTask(Invoke, Set("w1"))  // Pending state
+    val result = apply(t, Drop)
+    result.task == t and  // unchanged
+    result.effects == Set()
 
-  // --- Continue ---
-  pure val testContinue: bool =
-    val t = { state: Halted, version: 0, current: Invoke, pending: [] }
-    val result = apply(t, ContinueTask)
-    result.status == Created and
-    result.tsk.state == Pending and
-    result.tsk.version == 1 and
-    result.tsk.current == Invoke
+  // ==========================================================================
+  // Tests - ResumeTask Action
+  // ==========================================================================
 
-  // --- Full cycle test ---
+  pure val testResumeTask: bool =
+    val t = { ...createTask(Invoke, Set("w1")), state: Waiting }
+    val result = apply(t, ResumeTask("dep1"))
+    result.task.state == Pending and
+    result.task.version == 1 and
+    result.task.current == Resume("dep1") and
+    result.effects.contains(Send(Set("w1")))
+
+  pure val testResumeTaskFromNonWaiting: bool =
+    val t = { ...createTask(Invoke, Set("w1")), state: Claimed }
+    val result = apply(t, ResumeTask("dep1"))
+    result.task == t and  // unchanged
+    result.effects == Set()
+
+  // ==========================================================================
+  // Tests - Full Cycle
+  // ==========================================================================
+
   pure val testFullCycle: bool =
-    // Start with fresh task, enqueue with Invoke
-    val t0 = apply(initTask, Enqueue(Invoke)).tsk
+    // Start with fresh task, create with Invoke
+    val t0 = createTask(Invoke, Set("w1"))
     // Claim it
-    val r1 = apply(t0, ClaimTask(0))
-    val t1 = r1.tsk
+    val r1 = apply(t0, Claim(0))
+    val t1 = r1.task
     // Complete with callbacks -> Waiting
-    val r2 = apply(t1, CompleteTask(true))
-    val t2 = r2.tsk
+    val r2 = apply(t1, Complete(true))
+    val t2 = r2.task
     // Resume -> back to Pending with version=1, current=Resume("dep1")
     val r3 = apply(t2, ResumeTask("dep1"))
-    val t3 = r3.tsk
+    val t3 = r3.task
     // Claim again with new version
-    val r4 = apply(t3, ClaimTask(1))
-    val t4 = r4.tsk
-    // Complete promise -> terminal
-    val r5 = apply(t4, CompleteTask(false))
-    val t5 = r5.tsk
+    val r4 = apply(t3, Claim(1))
+    val t4 = r4.task
+    // Complete without callbacks -> terminal
+    val r5 = apply(t4, Complete(false))
+    val t5 = r5.task
 
     t0.current == Invoke and
     t1.state == Claimed and t1.version == 0 and
@@ -167,94 +188,50 @@ module task_test {
 
   // --- Drop and retry cycle ---
   pure val testDropRetry: bool =
-    val t0 = apply(initTask, Enqueue(Invoke)).tsk
-    val t1 = apply(t0, ClaimTask(0)).tsk
+    val t0 = createTask(Invoke, Set("w1"))
+    val t1 = apply(t0, Claim(0)).task
     // Drop -> back to Pending with version=1
-    val t2 = apply(t1, DropTask).tsk
+    val t2 = apply(t1, Drop).task
     // Old claim with v=0 should fail
-    val r3 = apply(t2, ClaimTask(0))
+    val r3 = apply(t2, Claim(0))
     // New claim with v=1 should succeed
-    val r4 = apply(t2, ClaimTask(1))
+    val r4 = apply(t2, Claim(1))
 
     t2.state == Pending and t2.version == 1 and
-    r3.status == Forbidden and
-    r4.status == Created and r4.tsk.state == Claimed
-
-  // --- Halt and continue cycle ---
-  pure val testHaltContinue: bool =
-    val t0 = apply(initTask, Enqueue(Invoke)).tsk
-    val t1 = apply(t0, ClaimTask(0)).tsk
-    val t2 = apply(t1, HaltTask).tsk
-    val t3 = apply(t2, ContinueTask).tsk
-    // Old claim with v=0 should fail
-    val r4 = apply(t3, ClaimTask(0))
-    // New claim with v=1 should succeed
-    val r5 = apply(t3, ClaimTask(1))
-
-    t2.state == Halted and t2.version == 0 and
-    t3.state == Pending and t3.version == 1 and
-    r4.status == Forbidden and
-    r5.status == Created
+    r3.task.state == Pending and  // claim failed
+    r4.task.state == Claimed  // claim succeeded
 
   // ==========================================================================
-  // Tests - Store Level
+  // Tests - Helper Functions
   // ==========================================================================
 
-  pure val testStoreEnqueue: bool =
-    val result = applyStore(emptyStore, StoreEnqueue({ id: "t1", msg: Invoke }))
-    result.status == Created and
-    result.tsk.state == Pending and
-    result.store.get("t1").state == Pending
+  pure val testIsTerminal: bool =
+    val pending = createTask(Invoke, Set("w1"))
+    val completed = { ...pending, state: Completed }
+    not(isTerminal(pending)) and isTerminal(completed)
 
-  pure val testStoreClaimAndComplete: bool =
-    val s1 = applyStore(emptyStore, StoreEnqueue({ id: "t1", msg: Invoke }))
-    val s2 = applyStore(s1.store, StoreClaim({ id: "t1", version: 0 }))
-    val s3 = applyStore(s2.store, StoreComplete({ id: "t1", createsCallbacks: false }))
-    s2.tsk.state == Claimed and
-    s3.tsk.state == Completed
+  pure val testIsClaimable: bool =
+    val pending = createTask(Invoke, Set("w1"))
+    val claimed = { ...pending, state: Claimed }
+    isClaimable(pending) and not(isClaimable(claimed))
 
-  pure val testStoreMultipleTasks: bool =
-    val store = execute(emptyStore, [
-      StoreEnqueue({ id: "t1", msg: Invoke }),
-      StoreEnqueue({ id: "t2", msg: Invoke }),
-      StoreClaim({ id: "t1", version: 0 }),
-      StoreClaim({ id: "t2", version: 0 }),
-      StoreComplete({ id: "t1", createsCallbacks: false }),
-      StoreComplete({ id: "t2", createsCallbacks: true })
-    ])
-    store.get("t1").state == Completed and
-    store.get("t2").state == Waiting
+  pure val testGetSendWorkers: bool =
+    val effects: Set[Effect] = Set(Send(Set("w1", "w2")))
+    getSendWorkers(effects) == Set("w1", "w2")
 
-  // ==========================================================================
-  // All Tests
-  // ==========================================================================
+  pure val testGetSendWorkersEmpty: bool =
+    val effects: Set[Effect] = Set()
+    getSendWorkers(effects) == Set()
 
-  pure val allTestsPass: bool =
-    // Task level
-    testEnqueue and
-    testEnqueueIdempotent and
-    testEnqueueBuffer and
-    testEnqueueBufferDuplicate and
-    testEnqueueBufferMultiple and
-    testEnqueueBufferCurrentDuplicate and
-    testClaimWithCorrectVersion and
-    testClaimWithWrongVersion and
-    testClaimIdempotent and
-    testClaimClearsPending and
-    testCompletePromise and
-    testCompleteWithCallbacks and
-    testCompleteWithPending and
-    testResume and
-    testResumePreservesPending and
-    testDrop and
-    testHalt and
-    testContinue and
-    testFullCycle and
-    testDropRetry and
-    testHaltContinue and
-    // Store level
-    testStoreEnqueue and
-    testStoreClaimAndComplete and
-    testStoreMultipleTasks
+  pure val testMessageId: bool =
+    messageId(Invoke) == "" and
+    messageId(Resume("dep1")) == "dep1"
+
+  pure val testIsDuplicate: bool =
+    val t = { ...createTask(Resume("dep1"), Set("w1")), pending: [Resume("dep2")] }
+    isDuplicate(t, Resume("dep1")) and  // current
+    isDuplicate(t, Resume("dep2")) and  // in pending
+    not(isDuplicate(t, Resume("dep3"))) and  // not present
+    not(isDuplicate(t, Invoke))  // Invoke never duplicate
 
 }
