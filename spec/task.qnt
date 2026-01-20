@@ -59,47 +59,44 @@ module task {
 
       | EnqueueInvoke =>
           match t.state {
-            // branch: task.enqueue_invoke.init
+            // branch: task.enqueue-invoke::init
             | Init => {
                 updated: { ...t, state: Pending, version: 0, current: Invoke, pending: [] },
                 messages: Set({ id: t.id, version: 0 })
               }
-            // branch: task.enqueue_invoke.noop
+            // branch: task.enqueue-invoke::noop
             // UNREACHABLE: EnqueueInvoke only triggered by CreatePromise effect when state is Init
             | _ => { updated: t, messages: Set() }
           }
 
       | EnqueueResume(awaited) =>
           match t.state {
-            // branch: task.enqueue_resume.init
-            | Init =>
-                { updated: t, messages: Set() }
-            // branch: task.enqueue_resume.pending
+            // branch: task.enqueue-resume::pending
             | Pending =>
                 { updated: { ...t, pending: t.pending.append(Resume(awaited)) }, messages: Set() }
-            // branch: task.enqueue_resume.claimed
+            // branch: task.enqueue-resume::claimed
             | Claimed =>
                 { updated: { ...t, pending: t.pending.append(Resume(awaited)) }, messages: Set() }
-            // branch: task.enqueue_resume.waiting
+            // branch: task.enqueue-resume::waiting
             | Waiting => {
                 updated: { ...t, state: Pending, version: t.version + 1, current: Resume(awaited) },
                 messages: Set({ id: t.id, version: t.version + 1 })
               }
-            // branch: task.enqueue_resume.completed
-            | Completed =>
-                { updated: t, messages: Set() }
+            // branch: task.enqueue-resume::noop
+            | _ => { updated: t, messages: Set() }
           }
 
       | Acquire(params) =>
           match t.state {
+            // branch: task.acquire::pending
             | Pending =>
                 if (params.version == t.version)
-                  // branch: task.acquire.pending.match
+                  // branch: task.acquire::pending.match
                   { updated: { ...t, state: Claimed, pending: [] }, messages: Set() }
                 else
-                  // branch: task.acquire.pending.mismatch
+                  // branch: task.acquire::pending.mismatch
                   { updated: t, messages: Set() }
-            // branch: task.acquire.noop
+            // branch: task.acquire::noop
             | _ => { updated: t, messages: Set() }
           }
 
@@ -107,15 +104,15 @@ module task {
           match t.state {
             | Claimed =>
                 if (params.version != t.version)
-                  // branch: task.release.claimed.mismatch
+                  // branch: task.release::claimed.mismatch
                   { updated: t, messages: Set() }
                 else
-                  // branch: task.release.claimed.match
+                  // branch: task.release::claimed.match
                   {
                     updated: { ...t, state: Pending, version: t.version + 1 },
                     messages: Set({ id: t.id, version: t.version + 1 })
                   }
-            // branch: task.release.noop
+            // branch: task.release::noop
             | _ => { updated: t, messages: Set() }
           }
 
@@ -123,19 +120,19 @@ module task {
           match t.state {
             | Claimed =>
                 if (params.version != t.version)
-                  // branch: task.suspend.claimed.mismatch
+                  // branch: task.suspend::claimed.mismatch
                   // UNREACHABLE: Server guard checks version match before calling
                   { updated: t, messages: Set() }
                 else
                   // First add all resumes to pending
                   val nowPending = t.pending.concat(params.resumes.foldl([], (acc, id) => acc.append(Resume(id))))
                   if (nowPending.length() > 0)
-                    // branch: task.suspend.claimed.match.resume
+                    // branch: task.suspend::claimed.match.resume
                     { updated: { ...t, current: nowPending.head(), pending: nowPending.tail() }, messages: Set() }
                   else
-                    // branch: task.suspend.claimed.match.wait
+                    // branch: task.suspend::claimed.match.wait
                     { updated: { ...t, state: Waiting }, messages: Set() }
-            // branch: task.suspend.noop
+            // branch: task.suspend::noop
             // UNREACHABLE: Server guard checks task is owned before calling
             | _ => { updated: t, messages: Set() }
           }
@@ -144,13 +141,13 @@ module task {
           match t.state {
             | Claimed =>
                 if (params.version != t.version)
-                  // branch: task.fulfill.claimed.mismatch
+                  // branch: task.fulfill::claimed.mismatch
                   // UNREACHABLE: Server guard checks version match before calling
                   { updated: t, messages: Set() }
                 else
-                  // branch: task.fulfill.claimed.match
+                  // branch: task.fulfill::claimed.match
                   { updated: { ...t, state: Completed }, messages: Set() }
-            // branch: task.fulfill.noop
+            // branch: task.fulfill::noop
             // UNREACHABLE: Server guard checks task is owned before calling
             | _ => { updated: t, messages: Set() }
           }

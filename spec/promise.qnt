@@ -44,33 +44,33 @@ module promise {
     match a {
       | Create(addresses) =>
           match p.state {
-            // branch: promise.create.init
+            // branch: promise.create::init
             | Init => {
                 updated: { ...p, state: Pending, addresses: addresses },
                 effects: if (addresses.size() > 0) Set(Invoke) else Set()
               }
-            // branch: promise.create.noop
+            // branch: promise.create::noop
             | _ => { updated: p, effects: Set() }
           }
 
       | Settle =>
           match p.state {
-            // branch: promise.settle.pending
+            // branch: promise.settle::pending
             | Pending => {
                 updated: { ...p, state: Settled, awaiters: Set() },
                 effects: p.awaiters.map(awaiter => Resume(awaiter))
               }
-            // branch: promise.settle.noop
+            // branch: promise.settle::noop
             | _ => { updated: p, effects: Set() }
           }
 
       | Register(awaiter) =>
           match p.state {
-            // branch: promise.register.pending
+            // branch: promise.register::pending
             | Pending => { updated: { ...p, awaiters: p.awaiters.union(Set(awaiter)) }, effects: Set() }
-            // branch: promise.register.settled
+            // branch: promise.register::settled
             | Settled => { updated: p, effects: Set(Resume(awaiter)) }
-            // branch: promise.register.noop
+            // branch: promise.register::noop
             | _ => { updated: p, effects: Set() }
           }
     }
