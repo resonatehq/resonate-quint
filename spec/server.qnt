@@ -82,13 +82,14 @@ module server {
                   { ...acc, messages: acc.messages.union(m0), tasks: acc.tasks.put(params.id, r1.updated) }
               | Resume(_) => acc // unreachable: Create never produces Resume
               | SetTimer => { ...acc, timers: acc.timers.union(Set(params.id)) }
+              | DelTimer => acc // unreachable: Create never produces DelTimer
             }
           )
 
       | SettlePromise(id) =>
           val p0 = getWithDefault(s0.promises, id, promise::init(id))
           val r0 = promise::apply(p0, promise::Settle, s0.now)
-          val s1 = { ...s0, promises: s0.promises.put(id, r0.updated), timers: s0.timers.exclude(Set(id)) }
+          val s1 = { ...s0, promises: s0.promises.put(id, r0.updated) }
           r0.effects.fold(s1, (acc, e) =>
             match e {
               | Invoke => acc // unreachable: Settle never produces Invoke
@@ -98,13 +99,26 @@ module server {
                   val r1 = task::apply(t0, task::EnqueueResume(id), acc.now)
                   val m0 = r1.messages
                   { ...acc, messages: acc.messages.union(m0), tasks: acc.tasks.put(awaiter, r1.updated) }
+              | DelTimer => { ...acc, timers: acc.timers.exclude(Set(id)) }
             }
           )
 
       | RegisterCallback(params) =>
           val p0 = getWithDefault(s0.promises, params.awaited, promise::init(params.awaited))
           val r0 = promise::apply(p0, promise::Register(params.awaiter), s0.now)
-          { ...s0, promises: s0.promises.put(params.awaited, r0.updated) }
+          val s1 = { ...s0, promises: s0.promises.put(params.awaited, r0.updated) }
+          r0.effects.fold(s1, (acc, e) =>
+            match e {
+              | Invoke => acc // unreachable: Register never produces Invoke
+              | SetTimer => acc // unreachable: Register never produces SetTimer
+              | Resume(awaiter) =>
+                  val t0 = getWithDefault(acc.tasks, awaiter, task::init(awaiter))
+                  val r1 = task::apply(t0, task::EnqueueResume(params.awaited), acc.now)
+                  val m0 = r1.messages
+                  { ...acc, messages: acc.messages.union(m0), tasks: acc.tasks.put(awaiter, r1.updated) }
+              | DelTimer => { ...acc, timers: acc.timers.exclude(Set(params.awaited)) }
+            }
+          )
     }
 
   // ==========================================================================
@@ -148,14 +162,15 @@ module server {
                     val p0 = getWithDefault(acc.server.promises, reg.awaited, promise::init(reg.awaited))
                     val r1 = promise::apply(p0, promise::Register(reg.awaiter), acc.server.now)
                     val s1 = { ...acc.server, promises: acc.server.promises.put(reg.awaited, r1.updated) }
-                    // Check if this returned a Resume effect (promise was settled)
-                    val resumes0 = r1.effects.fold(acc.resumes, (rs, e) =>
+                    // Process effects: collect resumes and handle DelTimer
+                    val result = r1.effects.fold({ srv: s1, rs: acc.resumes }, (inner, e) =>
                       match e {
-                        | Resume(_) => rs.append(reg.awaited)
-                        | _ => rs
+                        | Resume(_) => { srv: inner.srv, rs: inner.rs.append(reg.awaited) }
+                        | DelTimer => { srv: { ...inner.srv, timers: inner.srv.timers.exclude(Set(reg.awaited)) }, rs: inner.rs }
+                        | _ => inner
                       }
                     )
-                    { server: s1, resumes: resumes0 }
+                    { server: result.srv, resumes: result.rs }
                 | _ => acc
               }
             )

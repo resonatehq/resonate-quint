@@ -33,6 +33,7 @@ module promise {
     | Invoke
     | Resume(str) // awaiter
     | SetTimer
+    | DelTimer
 
   // ==========================================================================
   // Apply
@@ -72,7 +73,7 @@ module promise {
             // branch: promise.settle::pending
             | Pending => {
                 updated: { ...p, state: Settled, awaiters: Set() },
-                effects: p.awaiters.map(awaiter => Resume(awaiter))
+                effects: p.awaiters.map(awaiter => Resume(awaiter)).union(Set(DelTimer))
               }
             // branch: promise.settle::noop
             | _ => { updated: p, effects: Set() }
@@ -89,7 +90,7 @@ module promise {
                 else
                   {
                     updated: { ...p, state: Settled, awaiters: Set() },
-                    effects: p.awaiters.union(Set(awaiter)).map(a => Resume(a))
+                    effects: p.awaiters.union(Set(awaiter)).map(a => Resume(a)).union(Set(DelTimer))
                   }
             // branch: promise.register::settled
             | Settled => { updated: p, effects: Set(Resume(awaiter)) }
