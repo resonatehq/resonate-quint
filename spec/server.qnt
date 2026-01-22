@@ -1,4 +1,5 @@
 module server {
+  import util.* from "./util"
   import promise from "./promise"
   import task from "./task"
 
@@ -8,6 +9,8 @@ module server {
 
   /// Server state
   type Server = {
+    now: int,
+    timers: Set[str],
     messages: Set[task::Message],
     promises: str -> promise::Promise,
     tasks: str -> task::Task
@@ -15,6 +18,8 @@ module server {
 
   /// Empty server
   pure val init: Server = {
+    now: 0,
+    timers: Set(),
     messages: Set(),
     promises: Map(),
     tasks: Map()
@@ -26,7 +31,7 @@ module server {
 
   /// Coordination actions
   type CAction =
-    | CreatePromise({ id: str, addresses: Set[str] })
+    | CreatePromise({ id: str, target: Option, timeout: int })
     | SettlePromise(str)
     | RegisterCallback({ awaited: str, awaiter: str })
 
@@ -42,6 +47,7 @@ module server {
   type Action =
     | C(CAction)
     | D(DAction)
+    | Tick(int) // new time
 
   // ==========================================================================
   // Helpers
@@ -65,29 +71,31 @@ module server {
     match a {
       | CreatePromise(params) =>
           val p0 = getWithDefault(s0.promises, params.id, promise::init(params.id))
-          val r0 = promise::apply(p0, promise::Create(params.addresses))
+          val r0 = promise::apply(p0, promise::Create({ target: params.target, timeout: params.timeout }), s0.now)
           val s1 = { ...s0, promises: s0.promises.put(params.id, r0.updated) }
           r0.effects.fold(s1, (acc, e) =>
             match e {
               | Invoke =>
                   val t0 = getWithDefault(acc.tasks, params.id, task::init(params.id))
-                  val r1 = task::apply(t0, task::EnqueueInvoke)
+                  val r1 = task::apply(t0, task::EnqueueInvoke, acc.now)
                   val m0 = r1.messages
                   { ...acc, messages: acc.messages.union(m0), tasks: acc.tasks.put(params.id, r1.updated) }
               | Resume(_) => acc // unreachable: Create never produces Resume
+              | SetTimer => { ...acc, timers: acc.timers.union(Set(params.id)) }
             }
           )
 
       | SettlePromise(id) =>
           val p0 = getWithDefault(s0.promises, id, promise::init(id))
-          val r0 = promise::apply(p0, promise::Settle)
-          val s1 = { ...s0, promises: s0.promises.put(id, r0.updated) }
+          val r0 = promise::apply(p0, promise::Settle, s0.now)
+          val s1 = { ...s0, promises: s0.promises.put(id, r0.updated), timers: s0.timers.exclude(Set(id)) }
           r0.effects.fold(s1, (acc, e) =>
             match e {
               | Invoke => acc // unreachable: Settle never produces Invoke
+              | SetTimer => acc // unreachable: Settle never produces SetTimer
               | Resume(awaiter) =>
                   val t0 = getWithDefault(acc.tasks, awaiter, task::init(awaiter))
-                  val r1 = task::apply(t0, task::EnqueueResume(id))
+                  val r1 = task::apply(t0, task::EnqueueResume(id), acc.now)
                   val m0 = r1.messages
                   { ...acc, messages: acc.messages.union(m0), tasks: acc.tasks.put(awaiter, r1.updated) }
             }
@@ -95,7 +103,7 @@ module server {
 
       | RegisterCallback(params) =>
           val p0 = getWithDefault(s0.promises, params.awaited, promise::init(params.awaited))
-          val r0 = promise::apply(p0, promise::Register(params.awaiter))
+          val r0 = promise::apply(p0, promise::Register(params.awaiter), s0.now)
           { ...s0, promises: s0.promises.put(params.awaited, r0.updated) }
     }
 
@@ -107,12 +115,12 @@ module server {
     match a {
       | AcquireTask(params) =>
           val t0 = getWithDefault(s0.tasks, params.id, task::init(params.id))
-          val r0 = task::apply(t0, task::Acquire({ version: params.version }))
+          val r0 = task::apply(t0, task::Acquire({ version: params.version }), s0.now)
           { ...s0, tasks: s0.tasks.put(params.id, r0.updated) }
 
       | ReleaseTask(params) =>
           val t0 = getWithDefault(s0.tasks, params.id, task::init(params.id))
-          val r0 = task::apply(t0, task::Release({ version: params.version }))
+          val r0 = task::apply(t0, task::Release({ version: params.version }), s0.now)
           val m0 = r0.messages
           { ...s0, messages: s0.messages.union(m0), tasks: s0.tasks.put(params.id, r0.updated) }
 
@@ -125,7 +133,7 @@ module server {
             val s1 = applyCAction(s0, params.inner)
             // Then fulfill the task
             val t0 = getWithDefault(s1.tasks, params.id, task::init(params.id))
-            val r0 = task::apply(t0, task::Fulfill({ version: params.version }))
+            val r0 = task::apply(t0, task::Fulfill({ version: params.version }), s1.now)
             { ...s1, tasks: s1.tasks.put(params.id, r0.updated) }
 
       | SuspendTask(params) =>
@@ -138,7 +146,7 @@ module server {
               match act {
                 | RegisterCallback(reg) =>
                     val p0 = getWithDefault(acc.server.promises, reg.awaited, promise::init(reg.awaited))
-                    val r1 = promise::apply(p0, promise::Register(reg.awaiter))
+                    val r1 = promise::apply(p0, promise::Register(reg.awaiter), acc.server.now)
                     val s1 = { ...acc.server, promises: acc.server.promises.put(reg.awaited, r1.updated) }
                     // Check if this returned a Resume effect (promise was settled)
                     val resumes0 = r1.effects.fold(acc.resumes, (rs, e) =>
@@ -153,7 +161,7 @@ module server {
             )
             // Suspend the task with the collected resumes
             val t0 = getWithDefault(r0.server.tasks, params.id, task::init(params.id))
-            val r1 = task::apply(t0, task::Suspend({ version: params.version, resumes: r0.resumes }))
+            val r1 = task::apply(t0, task::Suspend({ version: params.version, resumes: r0.resumes }), r0.server.now)
             { ...r0.server, tasks: r0.server.tasks.put(params.id, r1.updated) }
 
       | FenceTask(params) =>
@@ -165,6 +173,21 @@ module server {
     }
 
   // ==========================================================================
+  // Apply Tick
+  // ==========================================================================
+
+  pure def applyTick(s0: Server, newTime: int): Server =
+    val s1 = { ...s0, now: newTime }
+    // Find expired timers and settle them
+    s1.timers.fold(s1, (acc, id) =>
+      val p = getWithDefault(acc.promises, id, promise::init(id))
+      if (p.state == promise::Pending and acc.now >= p.timeout)
+        applyCAction(acc, SettlePromise(id))
+      else
+        acc
+    )
+
+  // ==========================================================================
   // Apply
   // ==========================================================================
 
@@ -173,6 +196,7 @@ module server {
     match a {
       | C(cAction) => applyCAction(s0, cAction)
       | D(dAction) => applyDAction(s0, dAction)
+      | Tick(newTime) => applyTick(s0, newTime)
     }
 
 }

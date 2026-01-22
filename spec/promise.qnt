@@ -1,4 +1,5 @@
 module promise {
+  import util.* from "./util"
 
   // ==========================================================================
   // Types
@@ -12,24 +13,26 @@ module promise {
   type Promise = {
     id: str,
     state: State,
-    addresses: Set[str],
+    target: Option,
+    timeout: int,
     awaiters: Set[str]
   }
 
-  pure def init(id: str): Promise = { id: id, state: Init, addresses: Set(), awaiters: Set() }
+  pure def init(id: str): Promise = { id: id, state: Init, timeout: 0, target: None, awaiters: Set() }
 
   // ==========================================================================
   // Actions and Effects
   // ==========================================================================
 
   type Action =
-    | Create(Set[str])
+    | Create({ target: Option, timeout: int })
     | Settle
     | Register(str) // awaiter
 
   type Effect =
     | Invoke
     | Resume(str) // awaiter
+    | SetTimer
 
   // ==========================================================================
   // Apply
@@ -40,15 +43,26 @@ module promise {
     effects: Set[Effect]
   }
 
-  pure def apply(p: Promise, a: Action): Result =
+  pure def apply(p: Promise, a: Action, now: int): Result =
     match a {
-      | Create(addresses) =>
+      | Create(params) =>
           match p.state {
             // branch: promise.create::init
-            | Init => {
-                updated: { ...p, state: Pending, addresses: addresses },
-                effects: if (addresses.size() > 0) Set(Invoke) else Set()
-              }
+            | Init =>
+                // option: promise.create::init.current
+                if (now < params.timeout)
+                  {
+                    updated: { ...p, state: Pending, target: params.target, timeout: params.timeout },
+                    effects: match params.target {
+                      // option: promise.create::init.current.target
+                      | Some(_) => Set(Invoke, SetTimer)
+                      // option: promise.create::init.current.no-target
+                      | None => Set(SetTimer)
+                    }
+                  }
+                // option: promise.create::init.expired
+                else
+                  { updated: { ...p, state: Settled, target: params.target, timeout: params.timeout }, effects: Set() }
             // branch: promise.create::noop
             | _ => { updated: p, effects: Set() }
           }
@@ -67,7 +81,16 @@ module promise {
       | Register(awaiter) =>
           match p.state {
             // branch: promise.register::pending
-            | Pending => { updated: { ...p, awaiters: p.awaiters.union(Set(awaiter)) }, effects: Set() }
+            | Pending =>
+                // option: promise.register::pending.current
+                if (now < p.timeout)
+                  { updated: { ...p, awaiters: p.awaiters.union(Set(awaiter)) }, effects: Set() }
+                // option: promise.register::pending.expired
+                else
+                  {
+                    updated: { ...p, state: Settled, awaiters: Set() },
+                    effects: p.awaiters.union(Set(awaiter)).map(a => Resume(a))
+                  }
             // branch: promise.register::settled
             | Settled => { updated: p, effects: Set(Resume(awaiter)) }
             // branch: promise.register::noop

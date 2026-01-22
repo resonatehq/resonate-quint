@@ -54,7 +54,7 @@ module task {
     messages: Set[Message]
   }
 
-  pure def apply(t: Task, a: Action): Result =
+  pure def apply(t: Task, a: Action, now: int): Result =
     match a {
 
       | EnqueueInvoke =>
