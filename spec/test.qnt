@@ -218,6 +218,24 @@ module test {
   // Invariants
   // ==========================================================================
 
+  // Every pending promise has a timer
+  val onePendingPromiseOneTimer = state.promises.keys().forall(id =>
+    val p = server::getWithDefault(state.promises, id, promise::init(id))
+    p.state == promise::Pending implies state.timers.contains(id)
+  )
+
+  // Every timer belongs to a pending promise
+  val oneTimerOnePendingPromise = state.timers.forall(id =>
+    state.promises.keys().contains(id) and
+    server::getWithDefault(state.promises, id, promise::init(id)).state == promise::Pending
+  )
+
+  // Settled promises have no timers
+  val noTimerForSettledPromise = state.promises.keys().forall(id =>
+    val p = server::getWithDefault(state.promises, id, promise::init(id))
+    p.state == promise::Settled implies not(state.timers.contains(id))
+  )
+
   // For every promise with a target (not Init), there exists a task
   val onePromiseOneTask = state.promises.keys().forall(id =>
     val p = server::getWithDefault(state.promises, id, promise::init(id))
