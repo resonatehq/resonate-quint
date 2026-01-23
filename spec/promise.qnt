@@ -30,10 +30,13 @@ module promise {
     | Register(str) // awaiter
 
   type Effect =
-    | Invoke
-    | Resume(str) // awaiter
     | SetTimer
     | DelTimer
+
+  type Change =
+    | DidCreate
+    | DidSettle
+    | DidTrigger(str) // awaiter
 
   // ==========================================================================
   // Apply
@@ -41,7 +44,9 @@ module promise {
 
   type Result = {
     updated: Promise,
-    effects: Set[Effect]
+    effects: Set[Effect],
+    changes: Set[Change],
+    inspect: Inspect
   }
 
   pure def apply(p: Promise, a: Action, now: int): Result =
@@ -54,29 +59,34 @@ module promise {
                 if (now < params.timeout)
                   {
                     updated: { ...p, state: Pending, target: params.target, timeout: params.timeout },
-                    effects: match params.target {
-                      // option: promise.create::init.current.target
-                      | Some(_) => Set(Invoke, SetTimer)
-                      // option: promise.create::init.current.no-target
-                      | None => Set(SetTimer)
-                    }
+                    effects: Set(SetTimer),
+                    changes: Set(DidCreate),
+                    inspect: { id: p.id, branch: "promise.create::init.current" }
                   }
                 // option: promise.create::init.expired
                 else
-                  { updated: { ...p, state: Settled, target: params.target, timeout: params.timeout }, effects: Set() }
+                  {
+                    updated: { ...p, state: Settled, target: params.target, timeout: params.timeout },
+                    effects: Set(),
+                    changes: Set(DidCreate, DidSettle),
+                    inspect: { id: p.id, branch: "promise.create::init.expired" }
+                  }
             // branch: promise.create::noop
-            | _ => { updated: p, effects: Set() }
+            | _ => { updated: p, effects: Set(), changes: Set(), inspect: { id: p.id, branch: "promise.create::noop" } }
           }
 
       | Settle =>
           match p.state {
             // branch: promise.settle::pending
-            | Pending => {
-                updated: { ...p, state: Settled, awaiters: Set() },
-                effects: p.awaiters.map(awaiter => Resume(awaiter)).union(Set(DelTimer))
-              }
+            | Pending =>
+                {
+                  updated: { ...p, state: Settled, awaiters: Set() },
+                  effects: Set(DelTimer),
+                  changes: p.awaiters.map(awaiter => DidTrigger(awaiter)).union(Set(DidSettle)),
+                  inspect: { id: p.id, branch: "promise.settle::pending" }
+                }
             // branch: promise.settle::noop
-            | _ => { updated: p, effects: Set() }
+            | _ => { updated: p, effects: Set(), changes: Set(), inspect: { id: p.id, branch: "promise.settle::noop" } }
           }
 
       | Register(awaiter) =>
@@ -85,17 +95,24 @@ module promise {
             | Pending =>
                 // option: promise.register::pending.current
                 if (now < p.timeout)
-                  { updated: { ...p, awaiters: p.awaiters.union(Set(awaiter)) }, effects: Set() }
+                  {
+                    updated: { ...p, awaiters: p.awaiters.union(Set(awaiter)) },
+                    effects: Set(),
+                    changes: Set(),
+                    inspect: { id: p.id, branch: "promise.register::pending.current" }
+                  }
                 // option: promise.register::pending.expired
                 else
                   {
                     updated: { ...p, state: Settled, awaiters: Set() },
-                    effects: p.awaiters.union(Set(awaiter)).map(a => Resume(a)).union(Set(DelTimer))
+                    effects: Set(DelTimer),
+                    changes: p.awaiters.union(Set(awaiter)).map(a => DidTrigger(a)).union(Set(DidSettle)),
+                    inspect: { id: p.id, branch: "promise.register::pending.expired" }
                   }
             // branch: promise.register::settled
-            | Settled => { updated: p, effects: Set(Resume(awaiter)) }
+            | Settled => { updated: p, effects: Set(), changes: Set(DidTrigger(awaiter)), inspect: { id: p.id, branch: "promise.register::settled" } }
             // branch: promise.register::noop
-            | _ => { updated: p, effects: Set() }
+            | _ => { updated: p, effects: Set(), changes: Set(), inspect: { id: p.id, branch: "promise.register::noop" } }
           }
     }
 
