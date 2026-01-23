@@ -130,17 +130,18 @@ module test {
       }
     }
 
-  action doFulfillTask(id: str, version: int, settlePromiseId: str): bool =
+  // FulfillTask always settles the task's own promise (id == settlePromiseId)
+  action doFulfillTask(id: str, version: int): bool =
     val s1 = server::apply(state, server::D(server::FulfillTask({
       id: id,
       version: version,
-      inner: server::SettlePromise(settlePromiseId)
+      inner: server::SettlePromise(id)
     })))
     all {
       state' = s1,
       event' = {
         kind: FulfillTask,
-        data: { ...emptyAction.data, id: id, version: version, settlePromiseId: settlePromiseId }
+        data: { ...emptyAction.data, id: id, version: version, settlePromiseId: id }
       }
     }
 
@@ -205,7 +206,7 @@ module test {
       // Distribution actions
       doAcquireTask(id, version),
       doReleaseTask(id, version),
-      doFulfillTask(id, version, promiseId),
+      doFulfillTask(id, version),
       doSuspendTask(id, version, [awaitedId]),
       doFenceTask(id, version, promiseId, target, timeout),
       // Time actions
@@ -216,6 +217,58 @@ module test {
   // ==========================================================================
   // Invariants
   // ==========================================================================
+
+  // For every promise with a target (not Init), there exists a task
+  val onePromiseOneTask = state.promises.keys().forall(id =>
+    val p = server::getWithDefault(state.promises, id, promise::init(id))
+    (p.state != promise::Init and p.target != None) implies state.tasks.keys().contains(id)
+  )
+
+  // For every task (not Init), there exists a promise
+  val oneTaskOnePromise = state.tasks.keys().forall(id =>
+    val t = server::getWithDefault(state.tasks, id, task::init(id))
+    t.state != task::Init implies state.promises.keys().contains(id)
+  )
+
+  // If promise with target is active (Pending), task is active (Pending, Claimed, or Waiting)
+  val activePromiseActiveTask = state.promises.keys().forall(id =>
+    val p = server::getWithDefault(state.promises, id, promise::init(id))
+    val t = server::getWithDefault(state.tasks, id, task::init(id))
+    (p.state == promise::Pending and p.target != None) implies
+      (t.state == task::Pending or t.state == task::Claimed or t.state == task::Waiting)
+  )
+
+  // If task is active (Pending, Claimed, or Waiting), promise is active (Pending)
+  val activeTaskActivePromise = state.tasks.keys().forall(id =>
+    val t = server::getWithDefault(state.tasks, id, task::init(id))
+    val p = server::getWithDefault(state.promises, id, promise::init(id))
+    (t.state == task::Pending or t.state == task::Claimed or t.state == task::Waiting) implies
+      p.state == promise::Pending
+  )
+
+  // If promise with target is completed (Settled), task is completed
+  val completedPromiseCompletedTask = state.promises.keys().forall(id =>
+    val p = server::getWithDefault(state.promises, id, promise::init(id))
+    val t = server::getWithDefault(state.tasks, id, task::init(id))
+    (p.state == promise::Settled and p.target != None) implies t.state == task::Completed
+  )
+
+  // If task is completed, promise is completed (Settled)
+  val completedTaskCompletedPromise = state.tasks.keys().forall(id =>
+    val t = server::getWithDefault(state.tasks, id, task::init(id))
+    val p = server::getWithDefault(state.promises, id, promise::init(id))
+    t.state == task::Completed implies p.state == promise::Settled
+  )
+
+  // Waiting tasks have registered callbacks (are awaiters on some promise)
+  val waitingTaskHasRegisteredCallbacks = state.tasks.keys().forall(id =>
+    val t = server::getWithDefault(state.tasks, id, task::init(id))
+    t.state == task::Waiting implies
+      state.promises.keys().exists(pid =>
+        val p = server::getWithDefault(state.promises, pid, promise::init(pid))
+        p.awaiters.contains(id)
+      )
+  )
 
   // Tasks only exist for promises with targets
   val tasksHavePromises = state.tasks.keys().forall(id =>
